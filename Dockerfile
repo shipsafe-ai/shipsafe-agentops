@@ -10,12 +10,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy shipsafe-shared first (sibling repo, needed as local dep)
+# Build context = shipsafe/ parent directory
 COPY shipsafe-shared /app/shipsafe-shared
 
 # Copy project files
-COPY pyproject.toml README.md ./
-COPY agent ./agent
-COPY main.py ./
+COPY shipsafe-agentops/pyproject.toml shipsafe-agentops/README.md ./
+COPY shipsafe-agentops/agent ./agent
+COPY shipsafe-agentops/main.py ./
+
+# Rewrite local file dep path to container path
+RUN sed -i 's|file:///Users/prateeksrivastava/Documents/shipsafe/shipsafe-shared|file:///app/shipsafe-shared|g' pyproject.toml
 
 # Install Python deps with server extras
 RUN pip install --no-cache-dir -e ".[server]"
