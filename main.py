@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from agent.demo_seeder import SeedResult, seed_hormuz_crisis
 from agent.orchestrator import Orchestrator, OrchestrationResult
 from agent.specialists.fleet_watcher import AgentHealthReport, FleetWatcher
 
@@ -70,6 +71,21 @@ async def fleet(window_minutes: int = 30) -> AgentHealthReport:
     try:
         watcher = FleetWatcher()
         return await watcher.query_agent_health(window_minutes)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/demo/seed", response_model=SeedResult)
+async def demo_seed() -> SeedResult:
+    """Push Hormuz crisis + baseline spans to Dynatrace OTLP.
+
+    Call this first, wait ~30s for Grail ingestion, then POST /run.
+    Requires DT_ENVIRONMENT and DT_OTLP_TOKEN env vars.
+    """
+    try:
+        return await seed_hormuz_crisis()
+    except KeyError as exc:
+        raise HTTPException(status_code=500, detail=f"Missing env var: {exc}") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
