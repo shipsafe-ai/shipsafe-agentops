@@ -7,8 +7,7 @@
     "agentops": "./bin/agentops.js"
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsx bin/agentops.ts"
+    "start": "node bin/agentops.js"
   },
   "engines": {
     "node": ">=20"

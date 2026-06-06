@@ -1,0 +1,49 @@
+steps:
+  # Copy sibling shipsafe-shared into build context
+  - name: 'gcr.io/cloud-builders/git'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        git clone https://github.com/shipsafe-ai/shipsafe-shared.git /workspace/shipsafe-shared || \
+        cp -r /workspace/../shipsafe-shared /workspace/shipsafe-shared || \
+        echo "shipsafe-shared not found — build may fail if installed as local dep"
+
+  # Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - -t
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/shipsafe/agentops:${SHORT_SHA}'
+      - -t
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/shipsafe/agentops:latest'
+      - .
+
+  # Push image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/shipsafe/agentops'
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - shipsafe-agentops
+      - '--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/shipsafe/agentops:${SHORT_SHA}'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--no-allow-unauthenticated'
+
+substitutions:
+  _REGION: us-central1
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/shipsafe/agentops:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/shipsafe/agentops:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
