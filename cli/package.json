@@ -1,0 +1,16 @@
+{
+  "name": "shipsafe-agentops-cli",
+  "version": "0.1.0",
+  "description": "npx CLI for ShipSafe AgentOps fleet health queries",
+  "type": "module",
+  "bin": {
+    "agentops": "./bin/agentops.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx bin/agentops.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
