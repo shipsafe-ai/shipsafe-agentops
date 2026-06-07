@@ -1,9 +1,9 @@
 FROM python:3.12-slim
 
-# Node 20 — required for npx @dynatrace-oss/dynatrace-mcp-server@latest
+# Node 22 — required for dynatrace-mcp-server (needs webidl.util.markAsUncloneable)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 

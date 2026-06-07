@@ -44,11 +44,11 @@ async function cmdFleet(opts) {
   console.log(`Summary: ${data.summary}\n`);
 
   const rows = data.agents.map((a) => [
-    a.agent_name.padEnd(20),
+    (a.service_name ?? a.agent_name ?? "?").padEnd(20),
     statusColor(a.status).padEnd(20),
-    `${(a.error_rate * 100).toFixed(1)}%`.padStart(8),
-    `${a.p95_latency_ms.toFixed(0)}ms`.padStart(10),
-    String(a.total_spans).padStart(8),
+    `${(a.error_rate_pct ?? a.error_rate * 100 ?? 0).toFixed(1)}%`.padStart(8),
+    `${(a.p99_latency_ms ?? a.p95_latency_ms ?? 0).toFixed(0)}ms`.padStart(10),
+    String(a.span_count ?? a.total_spans ?? 0).padStart(8),
   ]);
 
   console.log(
@@ -59,7 +59,7 @@ async function cmdFleet(opts) {
 }
 
 async function cmdDemo(opts) {
-  const SEED_WAIT_S = 35;
+  const SEED_WAIT_S = 90;
 
   console.log("\x1b[1mShipSafe AgentOps — Hormuz Crisis Demo\x1b[0m");
   console.log("━".repeat(50));
@@ -107,11 +107,18 @@ async function cmdDemo(opts) {
     for (const rec of r.postmortem.recommendations) console.log(`  → ${rec}`);
   }
 
+  if (r.postmortem.agent_thinking) {
+    console.log("\n\x1b[35m── Gemini Thinking ──────────────────────────────────\x1b[0m");
+    const lines = r.postmortem.agent_thinking.split("\n");
+    for (const line of lines) console.log(`\x1b[90m${line}\x1b[0m`);
+    console.log("\x1b[35m─────────────────────────────────────────────────────\x1b[0m");
+  }
+
   console.log("\n" + "─".repeat(50));
   console.log(`Fleet score : ${r.health.fleet_health_score.toFixed(0)}/100`);
   console.log(`Cascade     : ${r.cascade.cascade_detected ? "\x1b[31mdetected\x1b[0m" : "none"}  root: ${r.cascade.root_cause}`);
   console.log(`Tokens      : ${(r.cost.total_tokens ?? 0).toLocaleString()}  cost: $${(r.cost.total_cost_usd ?? 0).toFixed(4)}`);
-  console.log(`Anomalies   : ${r.anomalies.anomaly_count} (${r.anomalies.overall_severity})`);
+  console.log(`Anomalies   : ${r.anomalies.anomaly_count} (${r.anomalies.overall_severity ?? r.anomalies.most_severe_service ?? "none"})`);
 }
 
 async function cmdRun(opts) {
@@ -144,6 +151,13 @@ async function cmdRun(opts) {
     for (const rec of r.postmortem.recommendations) {
       console.log(`  → ${rec}`);
     }
+  }
+
+  if (r.postmortem.agent_thinking) {
+    console.log("\n\x1b[35m── Gemini Thinking ──────────────────────────────────\x1b[0m");
+    const lines = r.postmortem.agent_thinking.split("\n");
+    for (const line of lines) console.log(`\x1b[90m${line}\x1b[0m`);
+    console.log("\x1b[35m─────────────────────────────────────────────────────\x1b[0m");
   }
 
   console.log(`\nFleet score: ${r.health.fleet_health_score.toFixed(0)}/100`);

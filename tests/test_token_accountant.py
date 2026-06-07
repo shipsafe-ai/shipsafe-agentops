@@ -231,7 +231,7 @@ async def test_get_cost_report_returns_cost_report(monkeypatch):
     mock_toolset.close = AsyncMock()
 
     with (
-        patch("agent.specialists.token_accountant.McpToolset", return_value=mock_toolset),
+        patch("agent.specialists.token_accountant.get_dt_mcp_tools", new_callable=AsyncMock, return_value=([], mock_toolset)),
         patch("agent.specialists.token_accountant.Agent"),
         patch("agent.specialists.token_accountant.Runner", return_value=mock_runner),
         patch("agent.specialists.token_accountant.InMemorySessionService") as mock_svc_cls,
@@ -293,7 +293,7 @@ async def test_get_cost_report_with_usage(monkeypatch):
     mock_toolset.close = AsyncMock()
 
     with (
-        patch("agent.specialists.token_accountant.McpToolset", return_value=mock_toolset),
+        patch("agent.specialists.token_accountant.get_dt_mcp_tools", new_callable=AsyncMock, return_value=([], mock_toolset)),
         patch("agent.specialists.token_accountant.Agent"),
         patch("agent.specialists.token_accountant.Runner", return_value=mock_runner),
         patch("agent.specialists.token_accountant.InMemorySessionService") as mock_svc_cls,
@@ -337,7 +337,7 @@ async def test_get_cost_report_fallback_on_bad_response(monkeypatch):
     mock_toolset.close = AsyncMock()
 
     with (
-        patch("agent.specialists.token_accountant.McpToolset", return_value=mock_toolset),
+        patch("agent.specialists.token_accountant.get_dt_mcp_tools", new_callable=AsyncMock, return_value=([], mock_toolset)),
         patch("agent.specialists.token_accountant.Agent"),
         patch("agent.specialists.token_accountant.Runner", return_value=mock_runner),
         patch("agent.specialists.token_accountant.InMemorySessionService") as mock_svc_cls,

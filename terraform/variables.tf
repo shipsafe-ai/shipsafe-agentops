@@ -12,11 +12,11 @@ variable "region" {
 
 variable "image_uri" {
   type        = string
-  description = "Container image URI, e.g. gcr.io/shipsafe-ai/agentops:latest"
+  description = "Artifact Registry image URI, e.g. us-central1-docker.pkg.dev/shipsafe-ai/shipsafe/agentops:latest"
 }
 
 variable "gemini_model" {
   type        = string
   description = "Gemini model name — read from config, never hardcoded (Rule 7)"
-  default     = "gemini-2.0-flash"
+  default     = "gemini-2.5-flash"
 }

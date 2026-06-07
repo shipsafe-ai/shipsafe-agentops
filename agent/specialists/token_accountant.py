@@ -9,7 +9,7 @@ from typing import Final
 from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.tools.mcp_tool.mcp_toolset import McpToolset, StdioServerParameters
+from agent.dt_mcp import get_dt_mcp_tools
 from google.genai import types as genai_types
 from pydantic import BaseModel, Field
 
@@ -34,28 +34,41 @@ fetch spans, from:now()-{window}m
 | summarize
     inputTokens=sum(toLong(`llm.token_count.prompt`)),
     outputTokens=sum(toLong(`llm.token_count.completion`)),
-    spanCount=count()
-  by service.name, `llm.model_name`
+    spanCount=count(),
+    by: {{service.name, `llm.model_name`}}
 | sort inputTokens desc\
 """
 
 _INSTRUCTION: Final[str] = """\
 You are TokenAccountant, cost analyst for the ShipSafe AI fleet.
 
-Execute the provided DQL query using execute_dql.
+Call execute_dql with the query. The tool returns DQL results directly.
+Columns: service.name, llm.model_name, inputTokens, outputTokens, spanCount.
+Null llm.model_name → use "unknown". Empty result → all zeros.
 
-The result contains columns: service.name, llm.model_name, inputTokens, outputTokens, spanCount.
-Rows where llm.model_name is null → use "unknown".
-If the query returns 0 rows → all agents have 0 token usage in the window.
+For each row: total_tokens = inputTokens + outputTokens
+estimated_cost_usd = (inputTokens * {price_in} + outputTokens * {price_out}) / 1_000_000
 
-For each row compute:
-  total_tokens = inputTokens + outputTokens
-  estimated_cost_usd = (inputTokens * {price_in} + outputTokens * {price_out}) / 1_000_000
-
-Aggregate totals across all rows.
-top_consumer = service.name with the highest total_tokens (null if all zero).
-
-Return ONLY valid JSON matching CostReport schema. No prose, no fences.\
+Return ONLY this JSON (no markdown, no prose, exact field names):
+{{
+  "agents": [
+    {{
+      "service_name": "cargodb",
+      "model_name": "gemini-2.5-flash",
+      "input_tokens": 5000,
+      "output_tokens": 1200,
+      "total_tokens": 6200,
+      "estimated_cost_usd": 0.00174,
+      "span_count": 8
+    }}
+  ],
+  "total_input_tokens": 5000,
+  "total_output_tokens": 1200,
+  "total_tokens": 6200,
+  "total_cost_usd": 0.00174,
+  "top_consumer": "cargodb",
+  "summary": "6,200 total tokens, $0.0017 USD."
+}}\
 """
 
 
@@ -114,18 +127,22 @@ def _recompute_totals(report: CostReport, window_minutes: int) -> CostReport:
 
 
 def _parse_llm_response(text: str) -> CostReport | None:
+    import re
     text = text.strip()
     if not text:
         return None
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    try:
-        return CostReport.model_validate_json(text)
-    except Exception:
+    for candidate in [text, *re.findall(r'\{[\s\S]*\}', text)]:
         try:
-            return CostReport(**json.loads(text))
+            return CostReport.model_validate_json(candidate)
         except Exception:
-            return None
+            pass
+        try:
+            return CostReport(**json.loads(candidate))
+        except Exception:
+            pass
+    return None
 
 
 def _fallback_report(window_minutes: int, reason: str) -> CostReport:
@@ -144,22 +161,12 @@ class TokenAccountant:
     """
 
     def __init__(self) -> None:
-        live_url = os.environ["DT_ENVIRONMENT"].rstrip("/")
-        self._dt_apps_url = live_url.replace(".live.dynatrace.com", ".apps.dynatrace.com")
-        self._dt_token = os.environ["DT_PLATFORM_TOKEN"]
-        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
     async def get_cost_report(
         self, window_minutes: int = _DEFAULT_WINDOW_MINUTES
     ) -> CostReport:
         """Return per-agent token usage and cost for the last `window_minutes` minutes."""
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if project:
-            import vertexai  # type: ignore[import-untyped]
-            vertexai.init(
-                project=project,
-                location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
-            )
 
         price_in, price_out = _get_prices()
         dql = _DQL_TOKEN_USAGE.format(window=window_minutes, services=_SERVICES_LITERAL)
@@ -170,22 +177,13 @@ class TokenAccountant:
             "Return CostReport JSON."
         )
 
-        toolset = McpToolset(
-            connection_params=StdioServerParameters(
-                command="npx",
-                args=["@dynatrace-oss/dynatrace-mcp-server@latest"],
-                env={
-                    "DT_ENVIRONMENT": self._dt_apps_url,
-                    "DT_TOKEN": self._dt_token,
-                },
-            )
-        )
+        tools, toolset = await get_dt_mcp_tools()
         try:
             agent = Agent(
                 model=self._model,
                 name="token_accountant",
                 instruction=instruction,
-                tools=[toolset],
+                tools=tools,
             )
             session_service = InMemorySessionService()
             session = await session_service.create_session(
@@ -198,6 +196,7 @@ class TokenAccountant:
             )
 
             result_text = ""
+            _json_fallback = ""
             async for event in runner.run_async(
                 user_id="system",
                 session_id=session.id,
@@ -206,8 +205,15 @@ class TokenAccountant:
                     parts=[genai_types.Part(text=prompt)],
                 ),
             ):
-                if event.is_final_response() and event.content and event.content.parts:
-                    result_text = event.content.parts[0].text or ""
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if hasattr(part, "text") and part.text:
+                            if event.is_final_response():
+                                result_text = part.text
+                            elif "{" in part.text:
+                                _json_fallback = part.text
+            if not result_text:
+                result_text = _json_fallback
         finally:
             await toolset.close()
 

@@ -1,5 +1,5 @@
 {
-  "name": "shipsafe-agentops-cli",
+  "name": "shipsafe-agentops",
   "version": "0.1.0",
   "description": "npx CLI for ShipSafe AgentOps fleet health queries",
   "type": "module",

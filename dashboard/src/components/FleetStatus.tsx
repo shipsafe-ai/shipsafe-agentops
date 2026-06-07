@@ -5,18 +5,19 @@ import { useEffect, useState } from "react";
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
 interface AgentHealth {
-  agent_name: string;
+  service_name: string;
   status: string;
-  error_rate: number;
-  p95_latency_ms: number;
-  total_spans: number;
-  token_count: number;
+  error_rate_pct: number;
+  p99_latency_ms: number;
+  span_count: number;
+  error_count: number;
 }
 
 interface FleetReport {
   agents: AgentHealth[];
   fleet_health_score: number;
   summary: string;
+  query_window_minutes: number;
 }
 
 const STATUS_COLOR: Record<string, string> = {
@@ -24,6 +25,13 @@ const STATUS_COLOR: Record<string, string> = {
   degraded: "text-yellow-400",
   critical: "text-red-400",
   no_data: "text-gray-500",
+};
+
+const STATUS_BORDER: Record<string, string> = {
+  healthy: "border-green-800",
+  degraded: "border-yellow-800",
+  critical: "border-red-800",
+  no_data: "border-gray-700",
 };
 
 export default function FleetStatus() {
@@ -48,6 +56,13 @@ export default function FleetStatus() {
 
   useEffect(() => { load(); }, [windowMinutes]);
 
+  const scoreColor =
+    (data?.fleet_health_score ?? 0) >= 80
+      ? "text-green-400"
+      : (data?.fleet_health_score ?? 0) >= 50
+      ? "text-yellow-400"
+      : "text-red-400";
+
   return (
     <section>
       <div className="flex items-center gap-4 mb-4">
@@ -58,7 +73,7 @@ export default function FleetStatus() {
             value={windowMinutes}
             onChange={(e) => setWindowMinutes(Number(e.target.value))}
           >
-            {[5, 15, 30, 60].map((m) => (
+            {[5, 10, 15, 30, 60].map((m) => (
               <option key={m} value={m}>{m}m</option>
             ))}
           </select>
@@ -66,24 +81,14 @@ export default function FleetStatus() {
         <button
           onClick={load}
           disabled={loading}
-          className="px-3 py-1 bg-indigo-700 rounded text-sm disabled:opacity-50"
+          className="px-3 py-1 bg-indigo-700 hover:bg-indigo-600 rounded text-sm disabled:opacity-50 transition-colors"
         >
           {loading ? "Loading…" : "Refresh"}
         </button>
         {data && (
           <span className="ml-auto text-lg font-bold">
-            Score:{" "}
-            <span
-              className={
-                data.fleet_health_score >= 80
-                  ? "text-green-400"
-                  : data.fleet_health_score >= 50
-                  ? "text-yellow-400"
-                  : "text-red-400"
-              }
-            >
-              {data.fleet_health_score.toFixed(0)}
-            </span>
+            Score: <span className={scoreColor}>{data.fleet_health_score.toFixed(0)}</span>
+            <span className="text-gray-500 text-sm font-normal">/100</span>
           </span>
         )}
       </div>
@@ -100,35 +105,37 @@ export default function FleetStatus() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {data.agents.map((a) => (
               <div
-                key={a.agent_name}
-                className="bg-gray-900 border border-gray-800 rounded-lg p-4"
+                key={a.service_name}
+                className={`bg-gray-900 border rounded-lg p-4 ${STATUS_BORDER[a.status] ?? "border-gray-800"}`}
               >
                 <div className="flex justify-between items-start mb-2">
-                  <span className="font-semibold">{a.agent_name}</span>
-                  <span
-                    className={`text-xs font-medium ${STATUS_COLOR[a.status] ?? "text-gray-400"}`}
-                  >
+                  <span className="font-semibold">{a.service_name}</span>
+                  <span className={`text-xs font-medium ${STATUS_COLOR[a.status] ?? "text-gray-400"}`}>
                     {a.status}
                   </span>
                 </div>
                 <dl className="text-xs text-gray-400 space-y-1">
                   <div className="flex justify-between">
                     <dt>Error rate</dt>
-                    <dd className={a.error_rate > 0.1 ? "text-red-400" : "text-gray-300"}>
-                      {(a.error_rate * 100).toFixed(1)}%
+                    <dd className={a.error_rate_pct > 5 ? "text-red-400" : "text-gray-300"}>
+                      {a.error_rate_pct.toFixed(1)}%
                     </dd>
                   </div>
                   <div className="flex justify-between">
-                    <dt>p95 latency</dt>
-                    <dd className="text-gray-300">{a.p95_latency_ms.toFixed(0)} ms</dd>
+                    <dt>p99 latency</dt>
+                    <dd className={a.p99_latency_ms >= 2000 ? "text-yellow-400" : "text-gray-300"}>
+                      {a.p99_latency_ms.toFixed(0)} ms
+                    </dd>
                   </div>
                   <div className="flex justify-between">
                     <dt>Spans</dt>
-                    <dd className="text-gray-300">{a.total_spans}</dd>
+                    <dd className="text-gray-300">{a.span_count}</dd>
                   </div>
                   <div className="flex justify-between">
-                    <dt>Tokens</dt>
-                    <dd className="text-gray-300">{a.token_count.toLocaleString()}</dd>
+                    <dt>Errors</dt>
+                    <dd className={a.error_count > 0 ? "text-red-400" : "text-gray-300"}>
+                      {a.error_count}
+                    </dd>
                   </div>
                 </dl>
               </div>

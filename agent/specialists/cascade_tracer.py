@@ -9,9 +9,9 @@ from typing import Final
 from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.tools.mcp_tool.mcp_toolset import McpToolset, StdioServerParameters
+from agent.dt_mcp import get_dt_mcp_tools
 from google.genai import types as genai_types
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from agent.specialists.fleet_watcher import SHIPSAFE_AGENTS
 
@@ -21,9 +21,10 @@ _DEFAULT_WINDOW_MINUTES: Final[int] = 30
 # A cascade = same trace_id has errors in more than one service.
 _DQL_CROSS_SERVICE_ERRORS: Final[str] = """\
 fetch spans, from:now()-{window}m
-| filter status == "ERROR"
+| filter span.status_code == "error"
 | filter in(service.name, {services})
-| summarize errorServices=collectDistinct(service.name), spanCount=count() by trace.id
+| summarize errorServices=collectDistinct(service.name), spanCount=count(),
+    by: {{trace.id}}
 | filter arraySize(errorServices) > 1
 | sort spanCount desc
 | limit 50\
@@ -32,9 +33,10 @@ fetch spans, from:now()-{window}m
 # Per-service error summary for root-cause ranking.
 _DQL_ERROR_SUMMARY: Final[str] = """\
 fetch spans, from:now()-{window}m
-| filter status == "ERROR"
+| filter span.status_code == "error"
 | filter in(service.name, {services})
-| summarize errorCount=count(), affectedTraces=countDistinct(trace.id) by service.name
+| summarize errorCount=count(), affectedTraces=countDistinct(trace.id),
+    by: {{service.name}}
 | sort errorCount desc\
 """
 
@@ -43,35 +45,42 @@ _SERVICES_LITERAL: Final[str] = ", ".join(f'"{s}"' for s in SHIPSAFE_AGENTS)
 _INSTRUCTION: Final[str] = """\
 You are CascadeTracer, distributed trace analyst for the ShipSafe AI fleet.
 
-You will receive two DQL queries. Execute both using execute_dql.
+Call execute_dql twice — once per query. The tool returns DQL results directly.
 
-Query 1 — cross-service cascade detection:
-Finds trace IDs where errors span more than one ShipSafe service.
-Result columns: trace.id, errorServices (list), spanCount.
+Query 1 — cross-service cascade detection (grouped by trace.id, which is the W3C trace ID):
+  cascade_detected = true if Query 1 returned >= 1 row
+  origin_service = service appearing most in errorServices arrays across all rows
 
 Query 2 — per-service error summary:
-Finds which services have the most errors.
-Result columns: service.name, errorCount, affectedTraces.
+  affected_services = list of service.name values from Query 2 results
 
-Analysis steps:
-1. If Query 1 returns rows → cascade detected. The service appearing earliest or most
-   frequently in errorServices arrays is the likely origin.
-2. If Query 1 returns 0 rows but Query 2 has rows → isolated failures, no cascade.
-3. If both return 0 rows → no errors in window.
+IMPORTANT: You MUST always return the JSON below — even if both queries return empty arrays.
+  If queries are empty: cascade_detected=false, origin_service=null, propagations=[], affected_services=[],
+  root_cause="No cross-service cascade detected in window.", summary="No cascade detected."
 
-cascade_detected = Query 1 returned at least 1 row.
-origin_service = the service that started the cascade (null if no cascade).
-affected_services = all services that had errors (from Query 2).
-propagations = one entry per unique cascade trace, listing origin + downstream services.
-root_cause = 1-2 sentence human-readable diagnosis.
-
-Return ONLY valid JSON matching CascadeReport schema. No prose, no fences.\
+Return ONLY this JSON (no markdown, no prose, exact field names):
+{
+  "cascade_detected": true,
+  "origin_service": "cargodb",
+  "affected_services": ["cargodb", "voyageblack", "tidesync"],
+  "propagations": [
+    {
+      "origin_service": "cargodb",
+      "affected_services": ["voyageblack", "tidesync"],
+      "trace_ids": ["abc123"]
+    }
+  ],
+  "root_cause": "CargoDB cascade caused voyageblack and tidesync failures.",
+  "summary": "3-service cascade originating from cargodb."
+}\
 """
 
 
 class FailurePropagation(BaseModel):
-    origin_service: str
-    affected_services: list[str]
+    model_config = {"populate_by_name": True}
+
+    origin_service: str = ""
+    affected_services: list[str] = Field(default_factory=list)
     trace_ids: list[str] = Field(default_factory=list)
 
 
@@ -87,18 +96,22 @@ class CascadeReport(BaseModel):
 
 
 def _parse_llm_response(text: str) -> CascadeReport | None:
+    import re
     text = text.strip()
     if not text:
         return None
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    try:
-        return CascadeReport.model_validate_json(text)
-    except Exception:
+    for candidate in [text, *re.findall(r'\{[\s\S]*\}', text)]:
         try:
-            return CascadeReport(**json.loads(text))
+            return CascadeReport.model_validate_json(candidate)
         except Exception:
-            return None
+            pass
+        try:
+            return CascadeReport(**json.loads(candidate))
+        except Exception:
+            pass
+    return None
 
 
 def _clean_report(report: CascadeReport, window_minutes: int) -> CascadeReport:
@@ -130,22 +143,12 @@ class CascadeTracer:
     """
 
     def __init__(self) -> None:
-        live_url = os.environ["DT_ENVIRONMENT"].rstrip("/")
-        self._dt_apps_url = live_url.replace(".live.dynatrace.com", ".apps.dynatrace.com")
-        self._dt_token = os.environ["DT_PLATFORM_TOKEN"]
-        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
     async def trace_cascade(
         self, window_minutes: int = _DEFAULT_WINDOW_MINUTES
     ) -> CascadeReport:
         """Detect cross-agent failure cascades in the last `window_minutes` minutes."""
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if project:
-            import vertexai  # type: ignore[import-untyped]
-            vertexai.init(
-                project=project,
-                location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
-            )
 
         dql_cascade = _DQL_CROSS_SERVICE_ERRORS.format(
             window=window_minutes, services=_SERVICES_LITERAL
@@ -160,22 +163,13 @@ class CascadeTracer:
             "Return CascadeReport JSON."
         )
 
-        toolset = McpToolset(
-            connection_params=StdioServerParameters(
-                command="npx",
-                args=["@dynatrace-oss/dynatrace-mcp-server@latest"],
-                env={
-                    "DT_ENVIRONMENT": self._dt_apps_url,
-                    "DT_TOKEN": self._dt_token,
-                },
-            )
-        )
+        tools, toolset = await get_dt_mcp_tools()
         try:
             agent = Agent(
                 model=self._model,
                 name="cascade_tracer",
                 instruction=_INSTRUCTION,
-                tools=[toolset],
+                tools=tools,
             )
             session_service = InMemorySessionService()
             session = await session_service.create_session(
@@ -188,6 +182,7 @@ class CascadeTracer:
             )
 
             result_text = ""
+            _json_fallback = ""
             async for event in runner.run_async(
                 user_id="system",
                 session_id=session.id,
@@ -196,8 +191,15 @@ class CascadeTracer:
                     parts=[genai_types.Part(text=prompt)],
                 ),
             ):
-                if event.is_final_response() and event.content and event.content.parts:
-                    result_text = event.content.parts[0].text or ""
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if hasattr(part, "text") and part.text:
+                            if event.is_final_response():
+                                result_text = part.text
+                            elif "{" in part.text:
+                                _json_fallback = part.text
+            if not result_text:
+                result_text = _json_fallback
         finally:
             await toolset.close()
 

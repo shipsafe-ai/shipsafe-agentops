@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Final
 
@@ -40,6 +41,8 @@ class OrchestrationResult(BaseModel):
     approved: bool
     requires_human_review: bool
     window_minutes: int = _DEFAULT_WINDOW_MINUTES
+    agentops_prompt_tokens: int = 0
+    agentops_completion_tokens: int = 0
 
 
 def build_sequential_agent(model: str) -> SequentialAgent:
@@ -75,7 +78,7 @@ class Orchestrator:
     """
 
     def __init__(self) -> None:
-        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
         self.sequential_agent = build_sequential_agent(self._model)
         self._fleet_watcher = FleetWatcher()
         self._cascade_tracer = CascadeTracer()
@@ -102,20 +105,15 @@ class Orchestrator:
             If Critic rejects (approved=False), result.approved=False and
             result.requires_human_review surfaces the gate to the caller.
         """
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if project:
-            import vertexai  # type: ignore[import-untyped]
-            vertexai.init(
-                project=project,
-                location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
-            )
 
-        # Stage 1-4: specialists (order matters for downstream synthesis)
-        health: AgentHealthReport = await self._fleet_watcher.query_agent_health(window_minutes)
-        cascade: CascadeReport = await self._cascade_tracer.trace_cascade(window_minutes)
-        cost: CostReport = await self._token_accountant.get_cost_report(window_minutes)
-        anomalies: AnomalyReport = await self._anomaly_scout.detect_anomalies(
-            current_minutes=current_minutes, baseline_minutes=baseline_minutes
+        # Stage 1-4: run all specialists concurrently (independent — no shared state)
+        health, cascade, cost, anomalies = await asyncio.gather(
+            self._fleet_watcher.query_agent_health(window_minutes),
+            self._cascade_tracer.trace_cascade(window_minutes),
+            self._token_accountant.get_cost_report(window_minutes),
+            self._anomaly_scout.detect_anomalies(
+                current_minutes=current_minutes, baseline_minutes=baseline_minutes
+            ),
         )
 
         # Stage 5: synthesise all specialist outputs into postmortem
@@ -136,4 +134,6 @@ class Orchestrator:
             approved=verdict.approved,
             requires_human_review=verdict.requires_human_review,
             window_minutes=window_minutes,
+            agentops_prompt_tokens=postmortem.narrator_prompt_tokens,
+            agentops_completion_tokens=postmortem.narrator_completion_tokens,
         )

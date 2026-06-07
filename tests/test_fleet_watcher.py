@@ -34,8 +34,8 @@ def test_shipsafe_agents_has_six_services():
 
 def test_dql_template_uses_fetch_spans():
     """DQL must query Dynatrace Grail, not make HTTP calls to other agents (Rule 8)."""
-    from agent.specialists.fleet_watcher import _DQL_TEMPLATE
-    assert "fetch spans" in _DQL_TEMPLATE
+    from agent.specialists.fleet_watcher import _DQL_QUERY
+    assert "fetch spans" in _DQL_QUERY
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +219,7 @@ async def test_fleet_watcher_query_returns_report(monkeypatch):
     mock_toolset.close = AsyncMock()
 
     with (
-        patch("agent.specialists.fleet_watcher.McpToolset", return_value=mock_toolset),
+        patch("agent.specialists.fleet_watcher.get_dt_mcp_tools", new_callable=AsyncMock, return_value=([], mock_toolset)),
         patch("agent.specialists.fleet_watcher.Agent"),
         patch("agent.specialists.fleet_watcher.Runner", return_value=mock_runner),
         patch(
@@ -265,7 +265,7 @@ async def test_fleet_watcher_fallback_on_bad_response(monkeypatch):
     mock_toolset.close = AsyncMock()
 
     with (
-        patch("agent.specialists.fleet_watcher.McpToolset", return_value=mock_toolset),
+        patch("agent.specialists.fleet_watcher.get_dt_mcp_tools", new_callable=AsyncMock, return_value=([], mock_toolset)),
         patch("agent.specialists.fleet_watcher.Agent"),
         patch("agent.specialists.fleet_watcher.Runner", return_value=mock_runner),
         patch(
@@ -286,35 +286,33 @@ async def test_fleet_watcher_fallback_on_bad_response(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fleet_watcher_mcp_uses_apps_url(monkeypatch):
-    """FleetWatcher converts live.dynatrace.com to apps.dynatrace.com for MCP."""
+    """get_dt_mcp_tools converts live.dynatrace.com to apps.dynatrace.com for MCP."""
     monkeypatch.setenv("DT_ENVIRONMENT", "https://abc123.live.dynatrace.com")
     monkeypatch.setenv("DT_PLATFORM_TOKEN", "tok")
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
 
     async def _fake_run_async(**kwargs):
         return
-        yield  # make it an async generator
+        yield
 
     mock_session = MagicMock()
     mock_session.id = "s"
     mock_runner = MagicMock()
     mock_runner.run_async = _fake_run_async
-    mock_toolset = MagicMock()
-    mock_toolset.close = AsyncMock()
-
     captured: dict = {}
 
     def _capture_mcp(*args, **kwargs):
         captured["env"] = kwargs.get("connection_params").env if kwargs.get("connection_params") else {}
+        mock_toolset = MagicMock()
+        mock_toolset.get_tools = AsyncMock(return_value=[])
+        mock_toolset.close = AsyncMock()
         return mock_toolset
 
     with (
-        patch("agent.specialists.fleet_watcher.McpToolset", side_effect=_capture_mcp),
+        patch("agent.dt_mcp.MCPToolset", side_effect=_capture_mcp),
         patch("agent.specialists.fleet_watcher.Agent"),
         patch("agent.specialists.fleet_watcher.Runner", return_value=mock_runner),
-        patch(
-            "agent.specialists.fleet_watcher.InMemorySessionService"
-        ) as mock_svc_cls,
+        patch("agent.specialists.fleet_watcher.InMemorySessionService") as mock_svc_cls,
     ):
         mock_svc = MagicMock()
         mock_svc.create_session = AsyncMock(return_value=mock_session)

@@ -9,7 +9,7 @@ from typing import Final, Literal
 from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.tools.mcp_tool.mcp_toolset import McpToolset, StdioServerParameters
+from agent.dt_mcp import get_dt_mcp_tools
 from google.genai import types as genai_types
 from pydantic import BaseModel, Field
 
@@ -34,9 +34,10 @@ fetch spans, from:now()-{current}m
 | filter in(service.name, {services})
 | summarize
     p99Ns=percentile(duration, 99),
-    errorRate=countIf(status == "ERROR") * 100.0 / count(),
-    spanCount=count()
-  by service.name\
+    errorRate=countIf(span.status_code == "error") * 100.0 / count(),
+    spanCount=count(),
+    by: {{service.name}}
+| sort errorRate desc, p99Ns desc\
 """
 
 # Baseline window: the hour before the current window.
@@ -45,37 +46,48 @@ fetch spans, from:now()-{baseline}m, to:now()-{current}m
 | filter in(service.name, {services})
 | summarize
     p99Ns=percentile(duration, 99),
-    errorRate=countIf(status == "ERROR") * 100.0 / count(),
-    spanCount=count()
-  by service.name\
+    errorRate=countIf(span.status_code == "error") * 100.0 / count(),
+    spanCount=count(),
+    by: {{service.name}}
+| sort errorRate desc, p99Ns desc\
 """
 
 _INSTRUCTION: Final[str] = """\
 You are AnomalyScout, latency and error-rate anomaly detector for the ShipSafe AI fleet.
 
-Execute both DQL queries using execute_dql.
-
+Call execute_dql twice — once per query. The tool returns DQL results directly.
 Query 1 = CURRENT window (last {current} minutes).
 Query 2 = BASELINE window ({baseline_start} to {baseline_end} minutes ago).
 
-For each service present in either result:
-1. Compute change_pct for p99 latency: (current_p99 - baseline_p99) / baseline_p99 * 100
-   (use 0 if baseline is 0 or service absent in baseline)
-2. Compute change_pct for error_rate: same formula
-3. Classify severity by the LARGER of the two change_pct values (absolute):
-   - none:     |change_pct| < {thr_low}
-   - low:      {thr_low} <= |change_pct| < {thr_medium}
-   - medium:   {thr_medium} <= |change_pct| < {thr_high}
-   - high:     {thr_high} <= |change_pct| < {thr_critical}
-   - critical: |change_pct| >= {thr_critical}
-4. Emit one AnomalyFinding per service with severity != "none".
-5. reasoning = one sentence explaining what changed and why it may matter.
+For each service in either result:
+1. p99 change_pct = (current_p99 - baseline_p99) / baseline_p99 * 100 (0 if baseline absent)
+2. error_rate change_pct = same formula
+3. severity = largest absolute change_pct:
+   none < {thr_low} | low < {thr_medium} | medium < {thr_high} | high < {thr_critical} | critical >= {thr_critical}
+4. Emit AnomalyFinding for severity != "none".
 
-most_severe_service = service with highest severity (null if no anomalies).
-anomaly_count = number of AnomalyFindings.
-summary = 1-2 sentences covering overall fleet anomaly status.
-
-Return ONLY valid JSON matching AnomalyReport schema. No prose, no fences.\
+Return ONLY this JSON (no markdown, no prose, exact field names):
+{{
+  "anomalies": [
+    {{
+      "service_name": "cargodb",
+      "p99_latency_baseline_ms": 480.0,
+      "p99_latency_current_ms": 4400.0,
+      "latency_change_pct": 817.0,
+      "error_rate_baseline_pct": 0.0,
+      "error_rate_current_pct": 60.0,
+      "error_rate_change_pct": 100.0,
+      "severity": "critical",
+      "reasoning": "CargoDB p99 latency spiked 8.8x and error rate jumped to 60%."
+    }}
+  ],
+  "anomaly_count": 1,
+  "most_severe_service": "cargodb",
+  "overall_severity": "critical",
+  "summary": "Critical anomaly detected in cargodb.",
+  "current_window_minutes": {current},
+  "baseline_window_minutes": {baseline_start}
+}}\
 """
 
 
@@ -95,6 +107,7 @@ class AnomalyReport(BaseModel):
     anomalies: list[AnomalyFinding] = Field(default_factory=list)
     anomaly_count: int = 0
     most_severe_service: str | None = None
+    overall_severity: SeverityLevel = "none"
     current_window_minutes: int = _DEFAULT_CURRENT_MINUTES
     baseline_window_minutes: int = _DEFAULT_BASELINE_MINUTES
     summary: str = ""
@@ -131,8 +144,10 @@ def _clean_report(
     if report.anomalies:
         top = max(report.anomalies, key=lambda f: _SEVERITY_RANK.get(f.severity, 0))
         report.most_severe_service = top.service_name
+        report.overall_severity = top.severity
     else:
         report.most_severe_service = None
+        report.overall_severity = "none"
 
     if not report.summary:
         if not report.anomalies:
@@ -176,10 +191,7 @@ class AnomalyScout:
     """
 
     def __init__(self) -> None:
-        live_url = os.environ["DT_ENVIRONMENT"].rstrip("/")
-        self._dt_apps_url = live_url.replace(".live.dynatrace.com", ".apps.dynatrace.com")
-        self._dt_token = os.environ["DT_PLATFORM_TOKEN"]
-        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
     async def detect_anomalies(
         self,
@@ -187,13 +199,6 @@ class AnomalyScout:
         baseline_minutes: int = _DEFAULT_BASELINE_MINUTES,
     ) -> AnomalyReport:
         """Detect metric anomalies by comparing current vs. baseline DQL windows."""
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if project:
-            import vertexai  # type: ignore[import-untyped]
-            vertexai.init(
-                project=project,
-                location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
-            )
 
         dql_current = _DQL_CURRENT.format(
             current=current_minutes, services=_SERVICES_LITERAL
@@ -218,22 +223,13 @@ class AnomalyScout:
             "Return AnomalyReport JSON."
         )
 
-        toolset = McpToolset(
-            connection_params=StdioServerParameters(
-                command="npx",
-                args=["@dynatrace-oss/dynatrace-mcp-server@latest"],
-                env={
-                    "DT_ENVIRONMENT": self._dt_apps_url,
-                    "DT_TOKEN": self._dt_token,
-                },
-            )
-        )
+        tools, toolset = await get_dt_mcp_tools()
         try:
             agent = Agent(
                 model=self._model,
                 name="anomaly_scout",
                 instruction=instruction,
-                tools=[toolset],
+                tools=tools,
             )
             session_service = InMemorySessionService()
             session = await session_service.create_session(
@@ -246,6 +242,7 @@ class AnomalyScout:
             )
 
             result_text = ""
+            _json_fallback = ""
             async for event in runner.run_async(
                 user_id="system",
                 session_id=session.id,
@@ -254,8 +251,15 @@ class AnomalyScout:
                     parts=[genai_types.Part(text=prompt)],
                 ),
             ):
-                if event.is_final_response() and event.content and event.content.parts:
-                    result_text = event.content.parts[0].text or ""
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if hasattr(part, "text") and part.text:
+                            if event.is_final_response():
+                                result_text = part.text
+                            elif "{" in part.text:
+                                _json_fallback = part.text
+            if not result_text:
+                result_text = _json_fallback
         finally:
             await toolset.close()
 

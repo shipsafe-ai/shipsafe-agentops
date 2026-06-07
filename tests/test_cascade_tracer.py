@@ -38,7 +38,7 @@ def test_dql_cross_service_query_targets_multiple_services():
     from agent.specialists.cascade_tracer import _DQL_CROSS_SERVICE_ERRORS, _SERVICES_LITERAL
     query = _DQL_CROSS_SERVICE_ERRORS.format(window=30, services=_SERVICES_LITERAL)
     assert "fetch spans" in query
-    assert "ERROR" in query
+    assert "error" in query.lower()
     assert "arraySize" in query  # cascade = errors in >1 service
 
 
@@ -187,7 +187,7 @@ async def test_trace_cascade_returns_report(monkeypatch):
     mock_toolset.close = AsyncMock()
 
     with (
-        patch("agent.specialists.cascade_tracer.McpToolset", return_value=mock_toolset),
+        patch("agent.specialists.cascade_tracer.get_dt_mcp_tools", new_callable=AsyncMock, return_value=([], mock_toolset)),
         patch("agent.specialists.cascade_tracer.Agent"),
         patch("agent.specialists.cascade_tracer.Runner", return_value=mock_runner),
         patch("agent.specialists.cascade_tracer.InMemorySessionService") as mock_svc_cls,
@@ -247,7 +247,7 @@ async def test_trace_cascade_detects_cascade(monkeypatch):
     mock_toolset.close = AsyncMock()
 
     with (
-        patch("agent.specialists.cascade_tracer.McpToolset", return_value=mock_toolset),
+        patch("agent.specialists.cascade_tracer.get_dt_mcp_tools", new_callable=AsyncMock, return_value=([], mock_toolset)),
         patch("agent.specialists.cascade_tracer.Agent"),
         patch("agent.specialists.cascade_tracer.Runner", return_value=mock_runner),
         patch("agent.specialists.cascade_tracer.InMemorySessionService") as mock_svc_cls,
@@ -293,7 +293,7 @@ async def test_trace_cascade_fallback_on_bad_response(monkeypatch):
     mock_toolset.close = AsyncMock()
 
     with (
-        patch("agent.specialists.cascade_tracer.McpToolset", return_value=mock_toolset),
+        patch("agent.specialists.cascade_tracer.get_dt_mcp_tools", new_callable=AsyncMock, return_value=([], mock_toolset)),
         patch("agent.specialists.cascade_tracer.Agent"),
         patch("agent.specialists.cascade_tracer.Runner", return_value=mock_runner),
         patch("agent.specialists.cascade_tracer.InMemorySessionService") as mock_svc_cls,
@@ -325,17 +325,18 @@ async def test_cascade_tracer_mcp_uses_apps_url(monkeypatch):
     mock_session.id = "s"
     mock_runner = MagicMock()
     mock_runner.run_async = _fake_run_async
-    mock_toolset = MagicMock()
-    mock_toolset.close = AsyncMock()
     captured: dict = {}
 
-    def _capture(*args, **kwargs):
+    def _capture_mcp(*args, **kwargs):
         if "connection_params" in kwargs:
             captured["env"] = kwargs["connection_params"].env
-        return mock_toolset
+        mock_toolset2 = MagicMock()
+        mock_toolset2.get_tools = AsyncMock(return_value=[])
+        mock_toolset2.close = AsyncMock()
+        return mock_toolset2
 
     with (
-        patch("agent.specialists.cascade_tracer.McpToolset", side_effect=_capture),
+        patch("agent.dt_mcp.MCPToolset", side_effect=_capture_mcp),
         patch("agent.specialists.cascade_tracer.Agent"),
         patch("agent.specialists.cascade_tracer.Runner", return_value=mock_runner),
         patch("agent.specialists.cascade_tracer.InMemorySessionService") as mock_svc_cls,

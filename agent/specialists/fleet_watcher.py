@@ -9,9 +9,10 @@ from typing import Final
 from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.tools.mcp_tool.mcp_toolset import McpToolset, StdioServerParameters
 from google.genai import types as genai_types
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
+
+from agent.dt_mcp import get_dt_mcp_tools
 
 SHIPSAFE_AGENTS: Final[list[str]] = [
     "cargodb",
@@ -24,47 +25,76 @@ SHIPSAFE_AGENTS: Final[list[str]] = [
 
 _DEFAULT_WINDOW_MINUTES: Final[int] = 30
 
-# DQL fetches span health per service. Duration in Dynatrace is nanoseconds.
-_DQL_TEMPLATE: Final[str] = (
-    'fetch spans, from:now()-{window}m\n'
-    '| filter service.name == "{service}"\n'
-    '| summarize spanCount=count(), errorCount=countIf(status == "ERROR"),\n'
-    '    p50Ns=percentile(duration, 50), p99Ns=percentile(duration, 99)'
-)
+# Single DQL fetches ALL services at once — avoids asking LLM to make 6 separate calls.
+# Duration in Dynatrace is nanoseconds.
+_DQL_QUERY: Final[str] = """\
+fetch spans, from:now()-{window}m
+| filter in(service.name, {services})
+| summarize spanCount=count(), errorCount=countIf(span.status_code == "error"),
+    p50Ns=percentile(duration, 50), p99Ns=percentile(duration, 99),
+    by: {{service.name}}\
+"""
+
+_KNOWN_SERVICES: Final[str] = ", ".join(f'"{s}"' for s in SHIPSAFE_AGENTS)
 
 _INSTRUCTION: Final[str] = """\
 You are FleetWatcher, observability analyst for the ShipSafe AI fleet.
 
-For each agent service below, call execute_dql with the provided DQL query.
-Parse each result and populate AgentHealthMetrics.
-Duration in DQL output is nanoseconds — divide by 1,000,000 to get milliseconds.
-If a service returns 0 rows or an empty result, set span_count=0 and status="no_data".
+Call the execute_dql tool ONCE with the provided DQL query.
+Returns a JSON array — one row per service that has spans. Duration fields are nanoseconds — divide by 1,000,000 for ms.
 
-Status classification (apply after computing metrics):
-- no_data:  span_count == 0
+For each row: error_rate_pct = errorCount * 100.0 / spanCount (0 if spanCount=0).
+
+Status rules:
+- no_data:  span_count == 0 (or service not in results)
 - critical: error_rate_pct >= 20 OR p99_latency_ms >= 5000
 - degraded: error_rate_pct >= 5  OR p99_latency_ms >= 2000
 - healthy:  otherwise
 
-fleet_health_score = average of per-agent scores
-(healthy=100, degraded=50, critical=0, no_data=70).
+Known services (include ALL in agents array, even those absent from results):
+cargodb, naviguard, routeforge, tidesync, voyageblack, agentops
 
-Respond with ONLY a valid JSON object matching AgentHealthReport. No prose, no fences.\
+fleet_health_score = average(healthy=100, degraded=50, critical=0, no_data=70) across all 6 agents.
+
+Return ONLY this JSON (no markdown, no prose, exact field names):
+{
+  "agents": [
+    {
+      "service_name": "cargodb",
+      "span_count": 5,
+      "error_count": 2,
+      "error_rate_pct": 40.0,
+      "p50_latency_ms": 480.0,
+      "p99_latency_ms": 4400.0,
+      "status": "critical"
+    }
+  ],
+  "fleet_health_score": 70.0,
+  "summary": "2 agents critical, 4 no_data.",
+  "query_window_minutes": 30
+}\
 """
 
 
 class AgentHealthMetrics(BaseModel):
-    service_name: str
-    span_count: int = Field(ge=0, default=0)
-    error_count: int = Field(ge=0, default=0)
-    error_rate_pct: float = Field(ge=0.0, le=100.0, default=0.0)
-    p50_latency_ms: float = Field(ge=0.0, default=0.0)
-    p99_latency_ms: float = Field(ge=0.0, default=0.0)
+    model_config = {"populate_by_name": True}
+
+    service_name: str = Field(validation_alias=AliasChoices("service_name", "agent_name", "name", "service"))
+    span_count: int = Field(ge=0, default=0, validation_alias=AliasChoices("span_count", "spanCount", "total_spans"))
+    error_count: int = Field(ge=0, default=0, validation_alias=AliasChoices("error_count", "errorCount"))
+    error_rate_pct: float = Field(ge=0.0, le=100.0, default=0.0, validation_alias=AliasChoices("error_rate_pct", "error_rate", "errorRate"))
+    p50_latency_ms: float = Field(ge=0.0, default=0.0, validation_alias=AliasChoices("p50_latency_ms", "p50Ms", "p50_ms"))
+    p99_latency_ms: float = Field(ge=0.0, default=0.0, validation_alias=AliasChoices("p99_latency_ms", "p99Ms", "p99_ms", "p95_latency_ms"))
     status: str = "no_data"
 
 
 class AgentHealthReport(BaseModel):
-    agents: list[AgentHealthMetrics]
+    model_config = {"populate_by_name": True}
+
+    agents: list[AgentHealthMetrics] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("agents", "agent_metrics", "fleet_agents", "agent_list"),
+    )
     fleet_health_score: float = Field(ge=0.0, le=100.0, default=100.0)
     summary: str = ""
     query_window_minutes: int = _DEFAULT_WINDOW_MINUTES
@@ -100,18 +130,22 @@ def _fallback_report(window_minutes: int, reason: str) -> AgentHealthReport:
 
 
 def _parse_llm_response(text: str) -> AgentHealthReport | None:
+    import re
     text = text.strip()
     if not text:
         return None
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    try:
-        return AgentHealthReport.model_validate_json(text)
-    except Exception:
+    for candidate in [text, *re.findall(r'\{[\s\S]*\}', text)]:
         try:
-            return AgentHealthReport(**json.loads(text))
+            return AgentHealthReport.model_validate_json(candidate)
         except Exception:
-            return None
+            pass
+        try:
+            return AgentHealthReport(**json.loads(candidate))
+        except Exception:
+            pass
+    return None
 
 
 class FleetWatcher:
@@ -122,51 +156,28 @@ class FleetWatcher:
     """
 
     def __init__(self) -> None:
-        live_url = os.environ["DT_ENVIRONMENT"].rstrip("/")
-        # MCP server uses apps.dynatrace.com, not live.dynatrace.com
-        self._dt_apps_url = live_url.replace(".live.dynatrace.com", ".apps.dynatrace.com")
-        self._dt_token = os.environ["DT_PLATFORM_TOKEN"]
-        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
     async def query_agent_health(
         self, window_minutes: int = _DEFAULT_WINDOW_MINUTES
     ) -> AgentHealthReport:
         """Query Dynatrace DQL for health metrics across all ShipSafe agents."""
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if project:
-            import vertexai  # type: ignore[import-untyped]
-            vertexai.init(
-                project=project,
-                location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
-            )
 
-        queries = "\n\n".join(
-            f"=== {svc} ===\n{_DQL_TEMPLATE.format(service=svc, window=window_minutes)}"
-            for svc in SHIPSAFE_AGENTS
-        )
+        dql = _DQL_QUERY.format(window=window_minutes, services=_KNOWN_SERVICES)
         prompt = (
             f"Query Dynatrace for ShipSafe fleet health. "
             f"Window: last {window_minutes} minutes.\n\n"
-            f"Run these DQL queries:\n\n{queries}\n\n"
-            "Return AgentHealthReport JSON."
+            f"Execute this DQL query:\n\n{dql}\n\n"
+            "Return AgentHealthReport JSON. Include ALL 6 known services."
         )
 
-        toolset = McpToolset(
-            connection_params=StdioServerParameters(
-                command="npx",
-                args=["@dynatrace-oss/dynatrace-mcp-server@latest"],
-                env={
-                    "DT_ENVIRONMENT": self._dt_apps_url,
-                    "DT_TOKEN": self._dt_token,
-                },
-            )
-        )
+        tools, toolset = await get_dt_mcp_tools()
         try:
             agent = Agent(
                 model=self._model,
                 name="fleet_watcher",
                 instruction=_INSTRUCTION,
-                tools=[toolset],
+                tools=tools,
             )
             session_service = InMemorySessionService()
             session = await session_service.create_session(
@@ -179,6 +190,7 @@ class FleetWatcher:
             )
 
             result_text = ""
+            _json_fallback = ""
             async for event in runner.run_async(
                 user_id="system",
                 session_id=session.id,
@@ -187,8 +199,15 @@ class FleetWatcher:
                     parts=[genai_types.Part(text=prompt)],
                 ),
             ):
-                if event.is_final_response() and event.content and event.content.parts:
-                    result_text = event.content.parts[0].text or ""
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if hasattr(part, "text") and part.text:
+                            if event.is_final_response():
+                                result_text = part.text
+                            elif "{" in part.text:
+                                _json_fallback = part.text
+            if not result_text:
+                result_text = _json_fallback
         finally:
             await toolset.close()
 

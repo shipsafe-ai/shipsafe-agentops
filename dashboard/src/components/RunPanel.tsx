@@ -17,6 +17,7 @@ interface OrchestrationResult {
     severity: string;
     narrative: string;
     recommendations: string[];
+    agent_thinking?: string;
   };
   verdict: {
     approved: boolean;
@@ -147,6 +148,16 @@ export default function RunPanel() {
                   ))}
                 </ul>
               </div>
+            )}
+            {result.postmortem.agent_thinking && (
+              <details className="mt-3">
+                <summary className="text-xs font-semibold text-purple-400 uppercase tracking-wider cursor-pointer select-none hover:text-purple-300">
+                  Gemini Thinking
+                </summary>
+                <pre className="mt-2 text-xs text-gray-400 bg-gray-950 rounded p-3 overflow-auto max-h-64 whitespace-pre-wrap">
+                  {result.postmortem.agent_thinking}
+                </pre>
+              </details>
             )}
           </div>
 

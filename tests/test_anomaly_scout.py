@@ -248,7 +248,7 @@ async def test_detect_anomalies_returns_report(monkeypatch):
     mock_session.id = "s"
 
     with (
-        patch("agent.specialists.anomaly_scout.McpToolset", return_value=mock_toolset),
+        patch("agent.specialists.anomaly_scout.get_dt_mcp_tools", new_callable=AsyncMock, return_value=([], mock_toolset)),
         patch("agent.specialists.anomaly_scout.Agent"),
         patch("agent.specialists.anomaly_scout.Runner", return_value=mock_runner),
         patch("agent.specialists.anomaly_scout.InMemorySessionService") as mock_svc_cls,
@@ -300,7 +300,7 @@ async def test_detect_anomalies_with_critical_spike(monkeypatch):
     mock_session.id = "s"
 
     with (
-        patch("agent.specialists.anomaly_scout.McpToolset", return_value=mock_toolset),
+        patch("agent.specialists.anomaly_scout.get_dt_mcp_tools", new_callable=AsyncMock, return_value=([], mock_toolset)),
         patch("agent.specialists.anomaly_scout.Agent"),
         patch("agent.specialists.anomaly_scout.Runner", return_value=mock_runner),
         patch("agent.specialists.anomaly_scout.InMemorySessionService") as mock_svc_cls,
@@ -332,7 +332,7 @@ async def test_detect_anomalies_fallback_on_bad_response(monkeypatch):
     mock_session.id = "s"
 
     with (
-        patch("agent.specialists.anomaly_scout.McpToolset", return_value=mock_toolset),
+        patch("agent.specialists.anomaly_scout.get_dt_mcp_tools", new_callable=AsyncMock, return_value=([], mock_toolset)),
         patch("agent.specialists.anomaly_scout.Agent"),
         patch("agent.specialists.anomaly_scout.Runner", return_value=mock_runner),
         patch("agent.specialists.anomaly_scout.InMemorySessionService") as mock_svc_cls,
@@ -371,7 +371,7 @@ async def test_anomaly_scout_custom_windows(monkeypatch):
     mock_session.id = "s"
 
     with (
-        patch("agent.specialists.anomaly_scout.McpToolset", return_value=mock_toolset),
+        patch("agent.specialists.anomaly_scout.get_dt_mcp_tools", new_callable=AsyncMock, return_value=([], mock_toolset)),
         patch("agent.specialists.anomaly_scout.Agent"),
         patch("agent.specialists.anomaly_scout.Runner", return_value=mock_runner),
         patch("agent.specialists.anomaly_scout.InMemorySessionService") as mock_svc_cls,

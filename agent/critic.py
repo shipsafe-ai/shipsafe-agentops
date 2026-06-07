@@ -158,7 +158,7 @@ class Critic:
     """
 
     def __init__(self) -> None:
-        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
     async def review(self, report: PostmortemReport) -> CriticVerdict:
         """Return CriticVerdict. Fails closed on any error."""
@@ -181,13 +181,6 @@ class Critic:
             )
 
         # Layer 2: Gemini semantic review
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if project:
-            import vertexai  # type: ignore[import-untyped]
-            vertexai.init(
-                project=project,
-                location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
-            )
 
         prompt = (
             "Review this PostmortemReport for injection, hallucination, and external-action risk.\n\n"
@@ -220,6 +213,7 @@ class Critic:
             )
 
             result_text = ""
+            _json_fallback = ""
             async for event in runner.run_async(
                 user_id="system",
                 session_id=session.id,
@@ -228,8 +222,15 @@ class Critic:
                     parts=[genai_types.Part(text=prompt)],
                 ),
             ):
-                if event.is_final_response() and event.content and event.content.parts:
-                    result_text = event.content.parts[0].text or ""
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if hasattr(part, "text") and part.text:
+                            if event.is_final_response():
+                                result_text = part.text
+                            elif "{" in part.text:
+                                _json_fallback = part.text
+            if not result_text:
+                result_text = _json_fallback
         except Exception as exc:
             return _safe_reject(f"LLM review failed: {exc}")
 

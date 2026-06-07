@@ -36,7 +36,7 @@ steps:
       - '--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/shipsafe/agentops:${SHORT_SHA}'
       - '--region=${_REGION}'
       - '--platform=managed'
-      - '--no-allow-unauthenticated'
+      - '--allow-unauthenticated'
 
 substitutions:
   _REGION: us-central1

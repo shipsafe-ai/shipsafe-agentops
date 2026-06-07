@@ -10,6 +10,7 @@ from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types as genai_types
+from google.genai.types import GenerateContentConfig, ThinkingConfig
 from pydantic import BaseModel, Field
 
 from agent.specialists.anomaly_scout import AnomalyReport
@@ -72,6 +73,9 @@ class PostmortemReport(BaseModel):
     token_cost_context: str = ""
     narrative: str = ""
     generated_from_window_minutes: int = 30
+    agent_thinking: str = ""
+    narrator_prompt_tokens: int = 0
+    narrator_completion_tokens: int = 0
 
 
 def _build_prompt(
@@ -118,16 +122,22 @@ def _fallback_report(reason: str) -> PostmortemReport:
     )
 
 
+def _supports_thinking(model: str) -> bool:
+    return "2.5" in model
+
+
 class IncidentNarrator:
     """Synthesises FleetWatcher, CascadeTracer, TokenAccountant, and AnomalyScout
     reports into a human-readable fleet postmortem via Gemini (Vertex AI).
 
     No MCP tools required — pure synthesis from structured specialist outputs.
     Uses ADK Agent pattern (Rule 2). Model read from GEMINI_MODEL env var (Rule 7).
+    When model supports thinking (gemini-2.5-*), captures thought tokens and
+    surfaces them in PostmortemReport.agent_thinking.
     """
 
     def __init__(self) -> None:
-        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        self._model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
     async def narrate(
         self,
@@ -137,22 +147,21 @@ class IncidentNarrator:
         anomalies: AnomalyReport,
     ) -> PostmortemReport:
         """Synthesise specialist reports into a PostmortemReport."""
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if project:
-            import vertexai  # type: ignore[import-untyped]
-            vertexai.init(
-                project=project,
-                location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
-            )
 
         prompt = _build_prompt(health, cascade, cost, anomalies)
 
-        agent = Agent(
+        agent_kwargs: dict = dict(
             model=self._model,
             name="incident_narrator",
             instruction=_INSTRUCTION,
             tools=[],
         )
+        if _supports_thinking(self._model):
+            agent_kwargs["generate_content_config"] = GenerateContentConfig(
+                thinking_config=ThinkingConfig(include_thoughts=True)
+            )
+
+        agent = Agent(**agent_kwargs)
         session_service = InMemorySessionService()
         session = await session_service.create_session(
             app_name="agentops", user_id="system"
@@ -164,6 +173,11 @@ class IncidentNarrator:
         )
 
         result_text = ""
+        _json_fallback = ""
+        thinking_parts: list[str] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+
         async for event in runner.run_async(
             user_id="system",
             session_id=session.id,
@@ -172,10 +186,34 @@ class IncidentNarrator:
                 parts=[genai_types.Part(text=prompt)],
             ),
         ):
-            if event.is_final_response() and event.content and event.content.parts:
-                result_text = event.content.parts[0].text or ""
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if getattr(part, "thought", None) is True and part.text:
+                        thinking_parts.append(part.text)
+                    elif hasattr(part, "text") and part.text:
+                        if event.is_final_response():
+                            result_text = part.text
+                        elif "{" in part.text:
+                            _json_fallback = part.text
+            usage = getattr(event, "usage_metadata", None)
+            if usage is not None:
+                pt = getattr(usage, "prompt_token_count", None)
+                ct = getattr(usage, "candidates_token_count", None)
+                if isinstance(pt, int):
+                    prompt_tokens = max(prompt_tokens, pt)
+                if isinstance(ct, int):
+                    completion_tokens = max(completion_tokens, ct)
+
+        if not result_text:
+            result_text = _json_fallback
 
         report = _parse_llm_response(result_text)
         if report is None:
             return _fallback_report(f"unparseable response: {result_text[:80]!r}")
+
+        if thinking_parts:
+            report.agent_thinking = "\n\n".join(thinking_parts)
+        report.narrator_prompt_tokens = prompt_tokens
+        report.narrator_completion_tokens = completion_tokens
+
         return report

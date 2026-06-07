@@ -111,16 +111,20 @@ def test_seed_result_fields():
 
 
 # ---------------------------------------------------------------------------
-# seed_hormuz_crisis — integration (OTLPSpanExporter mocked)
+# seed_hormuz_crisis — integration (httpx.Client mocked)
 # ---------------------------------------------------------------------------
 
-def _make_mock_exporter():
-    from opentelemetry.sdk.trace.export import SpanExportResult
-    mock = MagicMock()
-    mock.export.return_value = SpanExportResult.SUCCESS
-    mock.force_flush.return_value = True
-    mock.shutdown.return_value = None
-    return mock
+def _make_mock_http_client():
+    """Return a mock httpx.Client context manager whose post() returns HTTP 200."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = ""
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__ = MagicMock(return_value=mock_client)
+    mock_ctx.__exit__ = MagicMock(return_value=False)
+    return mock_ctx, mock_client
 
 
 @pytest.mark.asyncio
@@ -128,9 +132,8 @@ async def test_seed_pushes_all_spans(monkeypatch):
     monkeypatch.setenv("DT_ENVIRONMENT", "https://fake.live.dynatrace.com")
     monkeypatch.setenv("DT_OTLP_TOKEN", "fake-token")
 
-    mock_exporter = _make_mock_exporter()
-
-    with patch("agent.demo_seeder.OTLPSpanExporter", return_value=mock_exporter):
+    mock_ctx, mock_client = _make_mock_http_client()
+    with patch("agent.demo_seeder.httpx.Client", return_value=mock_ctx):
         from agent.demo_seeder import seed_hormuz_crisis
         result = await seed_hormuz_crisis()
 
@@ -143,9 +146,8 @@ async def test_seed_covers_all_six_services(monkeypatch):
     monkeypatch.setenv("DT_ENVIRONMENT", "https://fake.live.dynatrace.com")
     monkeypatch.setenv("DT_OTLP_TOKEN", "fake-token")
 
-    mock_exporter = _make_mock_exporter()
-
-    with patch("agent.demo_seeder.OTLPSpanExporter", return_value=mock_exporter):
+    mock_ctx, mock_client = _make_mock_http_client()
+    with patch("agent.demo_seeder.httpx.Client", return_value=mock_ctx):
         from agent.demo_seeder import seed_hormuz_crisis
         result = await seed_hormuz_crisis()
 
@@ -158,13 +160,12 @@ async def test_seed_reports_cascade_trace_groups(monkeypatch):
     monkeypatch.setenv("DT_ENVIRONMENT", "https://fake.live.dynatrace.com")
     monkeypatch.setenv("DT_OTLP_TOKEN", "fake-token")
 
-    mock_exporter = _make_mock_exporter()
-
-    with patch("agent.demo_seeder.OTLPSpanExporter", return_value=mock_exporter):
+    mock_ctx, mock_client = _make_mock_http_client()
+    with patch("agent.demo_seeder.httpx.Client", return_value=mock_ctx):
         from agent.demo_seeder import seed_hormuz_crisis
         result = await seed_hormuz_crisis()
 
-    assert len(result.trace_groups) >= 3  # cascade_1, cascade_2, cascade_3
+    assert len(result.trace_groups) >= 3
     assert "cascade_1" in result.trace_groups
 
 
@@ -173,21 +174,17 @@ async def test_seed_uses_correct_endpoint(monkeypatch):
     monkeypatch.setenv("DT_ENVIRONMENT", "https://ddz36363.live.dynatrace.com")
     monkeypatch.setenv("DT_OTLP_TOKEN", "tok123")
 
-    mock_exporter = _make_mock_exporter()
-    exporter_calls: list[dict] = []
-
-    def capture_exporter(**kwargs):
-        exporter_calls.append(kwargs)
-        return mock_exporter
-
-    with patch("agent.demo_seeder.OTLPSpanExporter", side_effect=capture_exporter):
+    mock_ctx, mock_client = _make_mock_http_client()
+    with patch("agent.demo_seeder.httpx.Client", return_value=mock_ctx):
         from agent.demo_seeder import seed_hormuz_crisis
         await seed_hormuz_crisis()
 
-    assert len(exporter_calls) > 0
-    for call in exporter_calls:
-        assert call["endpoint"] == "https://ddz36363.live.dynatrace.com/api/v2/otlp"
-        assert call["headers"]["Authorization"] == "Api-Token tok123"
+    # All posts must target live.dynatrace.com OTLP endpoint with Api-Token
+    for call in mock_client.post.call_args_list:
+        url = call.args[0] if call.args else call.kwargs.get("url", "")
+        headers = call.kwargs.get("headers", {})
+        assert "ddz36363.live.dynatrace.com/api/v2/otlp/v1/traces" in url
+        assert headers.get("Authorization") == "Api-Token tok123"
 
 
 @pytest.mark.asyncio
@@ -201,16 +198,14 @@ async def test_seed_missing_env_raises(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_seed_calls_force_flush_and_shutdown(monkeypatch):
-    """Each service provider must be flushed and shut down."""
+async def test_seed_makes_one_post_per_service(monkeypatch):
+    """seeder sends one HTTP POST per service to OTLP endpoint."""
     monkeypatch.setenv("DT_ENVIRONMENT", "https://fake.live.dynatrace.com")
     monkeypatch.setenv("DT_OTLP_TOKEN", "fake-token")
 
-    mock_exporter = _make_mock_exporter()
-
-    with patch("agent.demo_seeder.OTLPSpanExporter", return_value=mock_exporter):
+    mock_ctx, mock_client = _make_mock_http_client()
+    with patch("agent.demo_seeder.httpx.Client", return_value=mock_ctx):
         from agent.demo_seeder import seed_hormuz_crisis
         result = await seed_hormuz_crisis()
 
-    # One exporter instance per service = 6 force_flush + shutdown calls
-    assert mock_exporter.shutdown.call_count == len(result.services)
+    assert mock_client.post.call_count == len(result.services)

@@ -343,3 +343,70 @@ async def test_narrate_no_mcp_tools_used(monkeypatch):
         await narrator.narrate(_health(), _cascade(), _cost(), _anomalies())
 
     assert captured_tools == []
+
+
+# ---------------------------------------------------------------------------
+# Gemini thinking support
+# ---------------------------------------------------------------------------
+
+def test_supports_thinking_true_for_2_5():
+    from agent.specialists.incident_narrator import _supports_thinking
+    assert _supports_thinking("gemini-2.5-flash") is True
+    assert _supports_thinking("gemini-2.5-pro") is True
+
+
+def test_supports_thinking_false_for_2_0():
+    from agent.specialists.incident_narrator import _supports_thinking
+    assert _supports_thinking("gemini-2.0-flash") is False
+
+
+def test_postmortem_has_agent_thinking_field():
+    from agent.specialists.incident_narrator import PostmortemReport
+    r = PostmortemReport()
+    assert hasattr(r, "agent_thinking")
+    assert r.agent_thinking == ""
+
+
+@pytest.mark.asyncio
+async def test_narrate_captures_thought_parts(monkeypatch):
+    """Thought parts (part.thought is True) are captured in agent_thinking."""
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+
+    response_json = json.dumps({"title": "ok", "severity": "none", "narrative": "all clear."})
+
+    thought_part = MagicMock()
+    thought_part.thought = True
+    thought_part.text = "I am thinking deeply about this."
+
+    answer_part = MagicMock()
+    answer_part.thought = False
+    answer_part.text = response_json
+
+    mock_content = MagicMock()
+    mock_content.parts = [thought_part, answer_part]
+    mock_event = MagicMock()
+    mock_event.is_final_response.return_value = True
+    mock_event.content = mock_content
+
+    async def _fake_run_async(**kwargs):
+        yield mock_event
+
+    mock_runner = MagicMock()
+    mock_runner.run_async = _fake_run_async
+    mock_session = MagicMock()
+    mock_session.id = "s"
+
+    with (
+        patch("agent.specialists.incident_narrator.Agent"),
+        patch("agent.specialists.incident_narrator.Runner", return_value=mock_runner),
+        patch("agent.specialists.incident_narrator.InMemorySessionService") as mock_svc_cls,
+    ):
+        mock_svc = MagicMock()
+        mock_svc.create_session = AsyncMock(return_value=mock_session)
+        mock_svc_cls.return_value = mock_svc
+
+        from agent.specialists.incident_narrator import IncidentNarrator
+        narrator = IncidentNarrator()
+        report = await narrator.narrate(_health(), _cascade(), _cost(), _anomalies())
+
+    assert "thinking deeply" in report.agent_thinking

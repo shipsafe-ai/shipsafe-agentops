@@ -102,3 +102,12 @@ resource "google_project_iam_member" "agentops_vertex" {
   role    = "roles/aiplatform.user"
   member  = "serviceAccount:${google_service_account.agentops.email}"
 }
+
+# Allow unauthenticated invocations (dashboard + CLI can call without token)
+resource "google_cloud_run_v2_service_iam_member" "agentops_invoker" {
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.agentops.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
