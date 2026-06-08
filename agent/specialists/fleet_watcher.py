@@ -98,6 +98,8 @@ class AgentHealthReport(BaseModel):
     fleet_health_score: float = Field(ge=0.0, le=100.0, default=100.0)
     summary: str = ""
     query_window_minutes: int = _DEFAULT_WINDOW_MINUTES
+    gemini_prompt_tokens: int = 0
+    gemini_completion_tokens: int = 0
 
 
 def _status_for(m: AgentHealthMetrics) -> str:
@@ -191,6 +193,8 @@ class FleetWatcher:
 
             result_text = ""
             _json_fallback = ""
+            gemini_prompt_tokens = 0
+            gemini_completion_tokens = 0
             async for event in runner.run_async(
                 user_id="system",
                 session_id=session.id,
@@ -206,6 +210,14 @@ class FleetWatcher:
                                 result_text = part.text
                             elif "{" in part.text:
                                 _json_fallback = part.text
+                usage = getattr(event, "usage_metadata", None)
+                if usage is not None:
+                    pt = getattr(usage, "prompt_token_count", None)
+                    ct = getattr(usage, "candidates_token_count", None)
+                    if isinstance(pt, int):
+                        gemini_prompt_tokens = max(gemini_prompt_tokens, pt)
+                    if isinstance(ct, int):
+                        gemini_completion_tokens = max(gemini_completion_tokens, ct)
             if not result_text:
                 result_text = _json_fallback
         finally:
@@ -214,6 +226,8 @@ class FleetWatcher:
         report = _parse_llm_response(result_text)
         if report is None:
             return _fallback_report(window_minutes, f"unparseable response: {result_text[:80]!r}")
+        report.gemini_prompt_tokens = gemini_prompt_tokens
+        report.gemini_completion_tokens = gemini_completion_tokens
 
         for m in report.agents:
             m.status = _status_for(m)

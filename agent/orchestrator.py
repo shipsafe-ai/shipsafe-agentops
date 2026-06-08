@@ -134,6 +134,14 @@ class Orchestrator:
             approved=verdict.approved,
             requires_human_review=verdict.requires_human_review,
             window_minutes=window_minutes,
-            agentops_prompt_tokens=postmortem.narrator_prompt_tokens,
-            agentops_completion_tokens=postmortem.narrator_completion_tokens,
+            agentops_prompt_tokens=(
+                health.gemini_prompt_tokens + cascade.gemini_prompt_tokens
+                + cost.gemini_prompt_tokens + anomalies.gemini_prompt_tokens
+                + postmortem.narrator_prompt_tokens + verdict.gemini_prompt_tokens
+            ),
+            agentops_completion_tokens=(
+                health.gemini_completion_tokens + cascade.gemini_completion_tokens
+                + cost.gemini_completion_tokens + anomalies.gemini_completion_tokens
+                + postmortem.narrator_completion_tokens + verdict.gemini_completion_tokens
+            ),
         )
