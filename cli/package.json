@@ -1,7 +1,7 @@
 {
   "name": "shipsafe-agentops",
-  "version": "0.1.0",
-  "description": "AI agent fleet observability — monitor your AI agents with Dynatrace",
+  "version": "0.2.0",
+  "description": "AI agent fleet observability \u2014 monitor your AI agents with Dynatrace",
   "type": "module",
   "bin": {
     "agentops": "./bin/agentops.js"
@@ -12,6 +12,15 @@
   "engines": {
     "node": ">=20"
   },
-  "keywords": ["ai", "agents", "observability", "dynatrace", "opentelemetry"],
-  "license": "MIT"
+  "keywords": [
+    "ai",
+    "agents",
+    "observability",
+    "dynatrace",
+    "opentelemetry"
+  ],
+  "license": "MIT",
+  "files": [
+    "bin"
+  ]
 }

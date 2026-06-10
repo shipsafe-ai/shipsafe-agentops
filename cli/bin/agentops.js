@@ -1,193 +1,84 @@
 #!/usr/bin/env node
-/**
- * ShipSafe AgentOps CLI
- * Usage:
- *   npx shipsafe-agentops fleet [--window 30] [--api http://localhost:8080]
- *   npx shipsafe-agentops run   [--window 30] [--api http://localhost:8080]
- *   npx shipsafe-agentops health [--api http://localhost:8080]
- */
+// ShipSafe AgentOps CLI — uniform commands: init | demo | connect | health|fleet|run
+const BASE = process.env.AGENTOPS_API_URL || "https://shipsafe-agentops-336382452417.us-central1.run.app";
+const DASHBOARD = "https://shipsafe-agentops-dashboard-336382452417.us-central1.run.app";
+const NAME = "AgentOps", PKG = "shipsafe-agentops", PARTNER = "Dynatrace", SOURCE = "Cloud Run agents (OpenTelemetry)", SECRET = "DT_PLATFORM_TOKEN";
 
-const args = process.argv.slice(2);
+const [, , cmd, ...args] = process.argv;
+const flag = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function parseArgs(argv) {
-  const opts = { api: process.env.AGENTOPS_API_URL ?? "http://localhost:8080", window: 30 };
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--api" && argv[i + 1]) opts.api = argv[++i];
-    if (argv[i] === "--window" && argv[i + 1]) opts.window = Number(argv[++i]);
-  }
-  return opts;
+async function req(method, path, body, timeoutMs = 60000) {
+  try {
+    return await fetch(BASE + path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch { return null; }
 }
 
-function statusColor(status) {
-  const codes = { healthy: "\x1b[32m", degraded: "\x1b[33m", critical: "\x1b[31m", no_data: "\x1b[90m" };
-  return (codes[status] ?? "\x1b[0m") + status + "\x1b[0m";
-}
+const health = async () => {
+  const r = await req("GET", "/health", null, 20000);
+  if (!r) return console.error(`✗ cannot reach ${NAME} at ${BASE}`);
+  const d = await r.json().catch(() => ({}));
+  console.log(`✓ ${NAME} ${d.status ?? "ok"} — ${BASE}`);
+};
 
-function riskColor(level) {
-  const codes = { none: "\x1b[32m", low: "\x1b[34m", medium: "\x1b[33m", high: "\x1b[31m", critical: "\x1b[35m" };
-  return (codes[level] ?? "\x1b[0m") + level + "\x1b[0m";
-}
+const init = async () => {
+  console.log(`\nShipSafe ${NAME} — powered by ${PARTNER}\n${"-".repeat(54)}`);
+  console.log(`Agent URL : ${BASE}`);
+  console.log(`Dashboard : ${DASHBOARD}`);
+  console.log(`\nQuick start:`);
+  console.log(`  npx ${PKG} demo               # run the demo (zero config, hosted)`);
+  console.log(`  npx ${PKG} connect --uri ...  # point at your own ${SOURCE}`);
+  console.log(`\nHealth check:`);
+  await health();
+};
 
-async function cmdHealth(opts) {
-  const res = await fetch(`${opts.api}/health`);
-  const data = await res.json();
-  console.log(`\x1b[32m${data.status}\x1b[0m`);
-}
+const connect = async () => {
+  const uri = flag("--uri");
+  console.log(`\nConnect ${NAME} to your own ${SOURCE}:`);
+  if (uri) console.log(`  target: ${uri}`);
+  console.log(`  1. Store the connection in Secret Manager:`);
+  console.log(`       gcloud secrets create ${SECRET} --data-file=-`);
+  console.log(`  2. Deploy your own instance pointed at it (see terraform/ in the repo).`);
+  console.log(`\n  No setup needed for the demo — it runs on the hosted instance with built-in fixtures:`);
+  console.log(`       npx ${PKG} demo`);
+};
 
-async function cmdFleet(opts) {
-  console.log(`Querying fleet health (window: ${opts.window}m)…`);
-  const res = await fetch(`${opts.api}/fleet?window_minutes=${opts.window}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-  const data = await res.json();
+const demo = async () => {
+  console.log(`▶ Seeding Hormuz crisis telemetry into Dynatrace ...`);
+  const s = await req("POST", "/demo/seed", null, 60000);
+  if (!s) return console.error("✗ demo failed — cannot reach agent");
+  process.stdout.write("  Waiting ~90s for Grail ingestion");
+  for (let i = 0; i < 9; i++) { await sleep(10000); process.stdout.write("."); }
+  console.log("\n  Running the fleet pipeline (sequential, ~3 min) ...");
+  const r = await req("POST", "/run", { window_minutes: 15 }, 280000);
+  if (!r) return console.error("✗ run timed out — try the dashboard: " + DASHBOARD);
+  if (!r.ok) return console.error(`✗ run failed: HTTP ${r.status} ${(await r.text()).slice(0, 160)}`);
+  const d = await r.json();
+  console.log(`\n  Fleet health  : ${Math.round((d.health ?? {}).fleet_health_score ?? 0)}/100`);
+  console.log(`  Cascade root  : ${(d.cascade ?? {}).root_cause ?? "none"}`);
+  console.log(`  Postmortem    : ${(d.postmortem ?? {}).title ?? ""}`);
+  console.log(`  Verdict       : ${d.requires_human_review ? "Requires Human Review" : (d.approved ? "Approved" : "Blocked")}`);
+  console.log(`  Full feed in the dashboard: ${DASHBOARD}`);
+};
 
-  console.log(`\nFleet score: \x1b[1m${data.fleet_health_score.toFixed(0)}/100\x1b[0m`);
-  console.log(`Summary: ${data.summary}\n`);
+const fleet = async () => {
+  const r = await req("GET", "/fleet", null, 60000);
+  if (!r || !r.ok) return console.error("✗ cannot fetch fleet health");
+  const d = await r.json();
+  console.log(`\n${NAME} fleet health: ${Math.round(d.fleet_health_score ?? 0)}/100`);
+  for (const a of (d.agents ?? [])) console.log(`  ${a.service_name}: ${a.status}`);
+};
+const run = async () => { await demo(); };
 
-  const rows = data.agents.map((a) => [
-    (a.service_name ?? a.agent_name ?? "?").padEnd(20),
-    statusColor(a.status).padEnd(20),
-    `${(a.error_rate_pct ?? a.error_rate * 100 ?? 0).toFixed(1)}%`.padStart(8),
-    `${(a.p99_latency_ms ?? a.p95_latency_ms ?? 0).toFixed(0)}ms`.padStart(10),
-    String(a.span_count ?? a.total_spans ?? 0).padStart(8),
-  ]);
-
-  console.log(
-    ["Agent".padEnd(20), "Status".padEnd(20), "  ErrRate", "  p95 Lat", "   Spans"].join(" ")
-  );
-  console.log("─".repeat(72));
-  for (const row of rows) console.log(row.join(" "));
-}
-
-async function cmdDemo(opts) {
-  const SEED_WAIT_S = 90;
-
-  console.log("\x1b[1mShipSafe AgentOps — Hormuz Crisis Demo\x1b[0m");
-  console.log("━".repeat(50));
-
-  // Step 1: push spans to Dynatrace
-  console.log("\n[1/3] Seeding Hormuz crisis spans to Dynatrace…");
-  const seedRes = await fetch(`${opts.api}/demo/seed`, { method: "POST" });
-  if (!seedRes.ok) throw new Error(`Seed failed: ${await seedRes.text()}`);
-  const seed = await seedRes.json();
-  console.log(`     ✓ Pushed ${seed.spans_pushed} spans across ${seed.services.length} agents`);
-  console.log(`     ✓ Cascade groups: ${seed.trace_groups.join(", ")}`);
-
-  // Step 2: wait for Grail ingestion
-  process.stdout.write(`\n[2/3] Waiting ${SEED_WAIT_S}s for Dynatrace Grail ingestion  `);
-  for (let i = SEED_WAIT_S; i > 0; i--) {
-    process.stdout.write(`\r[2/3] Waiting ${SEED_WAIT_S}s for Dynatrace Grail ingestion  ${i}s `);
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  process.stdout.write("\r[2/3] Grail ingestion window elapsed ✓             \n");
-
-  // Step 3: run full pipeline (tight 10-min window to catch the seeds)
-  console.log("\n[3/3] Running AgentOps 6-stage pipeline…");
-  const runRes = await fetch(`${opts.api}/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ window_minutes: 10, current_minutes: 5, baseline_minutes: 60 }),
-  });
-  if (!runRes.ok) throw new Error(`Pipeline failed: ${await runRes.text()}`);
-  const r = await runRes.json();
-
-  console.log("\n" + "━".repeat(50));
-
-  const verdictLabel = r.approved
-    ? "\x1b[32m✓ APPROVED\x1b[0m"
-    : r.requires_human_review
-    ? "\x1b[33m⚠ REQUIRES HUMAN REVIEW\x1b[0m"
-    : "\x1b[31m✗ BLOCKED\x1b[0m";
-
-  console.log(`Verdict: ${verdictLabel}  Risk: ${riskColor(r.verdict.risk_level)}`);
-  console.log(`\n\x1b[1m${r.postmortem.title}\x1b[0m  [${r.postmortem.severity}]`);
-  console.log(r.postmortem.narrative);
-
-  if (r.postmortem.recommendations?.length) {
-    console.log("\nRecommendations:");
-    for (const rec of r.postmortem.recommendations) console.log(`  → ${rec}`);
-  }
-
-  if (r.postmortem.agent_thinking) {
-    console.log("\n\x1b[35m── Gemini Thinking ──────────────────────────────────\x1b[0m");
-    const lines = r.postmortem.agent_thinking.split("\n");
-    for (const line of lines) console.log(`\x1b[90m${line}\x1b[0m`);
-    console.log("\x1b[35m─────────────────────────────────────────────────────\x1b[0m");
-  }
-
-  console.log("\n" + "─".repeat(50));
-  console.log(`Fleet score : ${r.health.fleet_health_score.toFixed(0)}/100`);
-  console.log(`Cascade     : ${r.cascade.cascade_detected ? "\x1b[31mdetected\x1b[0m" : "none"}  root: ${r.cascade.root_cause}`);
-  console.log(`Tokens      : ${(r.cost.total_tokens ?? 0).toLocaleString()}  cost: $${(r.cost.total_cost_usd ?? 0).toFixed(4)}`);
-  console.log(`Anomalies   : ${r.anomalies.anomaly_count} (${r.anomalies.overall_severity ?? r.anomalies.most_severe_service ?? "none"})`);
-}
-
-async function cmdRun(opts) {
-  console.log(`Running full pipeline (window: ${opts.window}m)…`);
-  const res = await fetch(`${opts.api}/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ window_minutes: opts.window }),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-  const r = await res.json();
-
-  const verdictLabel = r.approved
-    ? "\x1b[32mAPPROVED\x1b[0m"
-    : r.requires_human_review
-    ? "\x1b[33mHUMAN REVIEW REQUIRED\x1b[0m"
-    : "\x1b[31mBLOCKED\x1b[0m";
-
-  console.log(`\nVerdict: ${verdictLabel}  Risk: ${riskColor(r.verdict.risk_level)}`);
-  console.log(`Reasoning: ${r.verdict.reasoning}`);
-  if (r.verdict.injection_detected) {
-    console.log("\x1b[31mPrompt injection detected!\x1b[0m");
-  }
-
-  console.log(`\n\x1b[1m${r.postmortem.title}\x1b[0m  [${r.postmortem.severity}]`);
-  console.log(r.postmortem.narrative);
-
-  if (r.postmortem.recommendations?.length) {
-    console.log("\nRecommendations:");
-    for (const rec of r.postmortem.recommendations) {
-      console.log(`  → ${rec}`);
-    }
-  }
-
-  if (r.postmortem.agent_thinking) {
-    console.log("\n\x1b[35m── Gemini Thinking ──────────────────────────────────\x1b[0m");
-    const lines = r.postmortem.agent_thinking.split("\n");
-    for (const line of lines) console.log(`\x1b[90m${line}\x1b[0m`);
-    console.log("\x1b[35m─────────────────────────────────────────────────────\x1b[0m");
-  }
-
-  console.log(`\nFleet score: ${r.health.fleet_health_score.toFixed(0)}/100`);
-  console.log(`Cascade: ${r.cascade.cascade_detected ? "detected" : "none"}  |  Cost: $${(r.cost.total_cost_usd ?? 0).toFixed(4)}  |  Anomalies: ${r.anomalies.anomaly_count} (${r.anomalies.overall_severity})`);
-}
-
-const [cmd, ...rest] = args;
-const opts = parseArgs(rest);
-
-const commands = { health: cmdHealth, fleet: cmdFleet, run: cmdRun, demo: cmdDemo };
-
-if (!cmd || cmd === "--help" || cmd === "-h") {
-  console.log("Usage: agentops <command> [options]\n");
-  console.log("Commands:");
-  console.log("  health  Check server liveness");
-  console.log("  fleet   Live fleet health (FleetWatcher only)");
-  console.log("  run     Full pipeline — all 6 stages");
-  console.log("  demo    Seed Hormuz crisis spans → wait → run pipeline (no DT Grail needed)");
-  console.log("\nOptions:");
-  console.log("  --api <url>      API base URL (default: $AGENTOPS_API_URL or http://localhost:8080)");
-  console.log("  --window <min>   Look-back window in minutes (default: 30)");
-  process.exit(0);
-}
-
-if (!commands[cmd]) {
-  console.error(`Unknown command: ${cmd}`);
+const cmds = { init, demo, connect, health, fleet, run };
+const fn = cmds[cmd];
+if (!fn) {
+  console.log("Usage: npx shipsafe-agentops <init|demo|connect|health|fleet|run>");
   process.exit(1);
 }
-
-commands[cmd](opts).catch((err) => {
-  console.error(`\x1b[31mError:\x1b[0m ${err.message}`);
-  process.exit(1);
-});
+fn().catch((e) => { console.error(e.message); process.exit(1); });
