@@ -6,8 +6,11 @@ import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+import json
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from agent.demo_seeder import SeedResult, seed_hormuz_crisis
@@ -64,6 +67,34 @@ async def run(req: RunRequest = RunRequest()) -> OrchestrationResult:
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/run/stream")
+async def run_stream(req: RunRequest = RunRequest()) -> StreamingResponse:
+    """SSE stream — emits one event per pipeline stage as it completes.
+
+    The live activity feed: FleetWatcher/CascadeTracer/TokenAccountant/AnomalyScout
+    fire concurrently and report 'done' as each finishes, then IncidentNarrator,
+    then Critic. Streaming bypasses the Cloud Run request timeout.
+    """
+    async def generate():
+        orch = Orchestrator()
+        async for event in orch.run_stream(
+            window_minutes=req.window_minutes,
+            current_minutes=req.current_minutes,
+            baseline_minutes=req.baseline_minutes,
+        ):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.get("/fleet", response_model=AgentHealthReport)

@@ -35,23 +35,76 @@ const SEVERITY_COLOR: Record<string, string> = {
   critical: "text-red-400",
 };
 
+type StepStatus = "pending" | "running" | "done";
+interface RunStep {
+  step: number;
+  name: string;
+  status: StepStatus;
+  message?: string;
+}
+
+const PIPELINE_STEPS: RunStep[] = [
+  { step: 1, name: "FleetWatcher", status: "pending" },
+  { step: 2, name: "CascadeTracer", status: "pending" },
+  { step: 3, name: "TokenAccountant", status: "pending" },
+  { step: 4, name: "AnomalyScout", status: "pending" },
+  { step: 5, name: "IncidentNarrator", status: "pending" },
+  { step: 6, name: "Critic", status: "pending" },
+];
+
 export default function RunPanel() {
   const [result, setResult] = useState<OrchestrationResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [windowMinutes, setWindowMinutes] = useState(30);
+  const [steps, setSteps] = useState<RunStep[]>([]);
 
   async function runPipeline() {
     setLoading(true);
     setError(null);
+    setResult(null);
+    setSteps(PIPELINE_STEPS.map((s) => ({ ...s, status: "pending" })));
     try {
-      const res = await fetch(`${API}/run`, {
+      const res = await fetch(`${API}/run/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ window_minutes: windowMinutes }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      setResult(await res.json());
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          let evt: Record<string, unknown>;
+          try {
+            evt = JSON.parse(line.slice(6));
+          } catch {
+            continue;
+          }
+          if (evt.event === "step") {
+            setSteps((prev) =>
+              prev.map((s) =>
+                s.step === evt.step
+                  ? { ...s, status: evt.status as StepStatus, message: evt.message as string }
+                  : s
+              )
+            );
+          } else if (evt.event === "complete") {
+            setResult(evt.result as OrchestrationResult);
+          } else if (evt.event === "error") {
+            setError(String(evt.error));
+          }
+        }
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -86,6 +139,53 @@ export default function RunPanel() {
       {error && (
         <div className="bg-red-900/30 border border-red-700 rounded p-3 text-red-300 text-sm mb-4">
           {error}
+        </div>
+      )}
+
+      {/* Live activity feed — agents reporting as each stage completes */}
+      {steps.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+              {loading ? "Fleet analysis in progress" : "Pipeline steps"}
+            </span>
+            {loading && (
+              <span className="flex gap-1">
+                {[0, 1, 2].map((i) => (
+                  <span
+                    key={i}
+                    className="w-1.5 h-1.5 rounded-full bg-teal-400 animate-bounce"
+                    style={{ animationDelay: `${i * 150}ms` }}
+                  />
+                ))}
+              </span>
+            )}
+          </div>
+          <div className="space-y-2">
+            {steps.map((s) => (
+              <div key={s.step} className="flex items-start gap-3 text-sm">
+                <span
+                  className={`mt-0.5 leading-none ${
+                    s.status === "done"
+                      ? "text-teal-400"
+                      : s.status === "running"
+                      ? "text-teal-300 animate-pulse"
+                      : "text-gray-700"
+                  }`}
+                >
+                  {s.status === "done" ? "✓" : s.status === "running" ? "●" : "○"}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <span className={s.status === "pending" ? "text-gray-600" : "text-gray-200"}>
+                    {s.name}
+                  </span>
+                  {s.message && (
+                    <span className="text-gray-500 text-xs ml-2 truncate">{s.message}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -134,6 +234,12 @@ export default function RunPanel() {
               </span>
             </div>
             <p className="text-sm text-gray-300 mb-3">{result.postmortem.narrative}</p>
+            {result.cascade?.root_cause && (
+              <p className="text-sm text-gray-400 mb-3 border-l-2 border-teal-600/50 pl-3">
+                <span className="text-xs uppercase tracking-wider text-gray-500">Cascade root cause · </span>
+                {result.cascade.root_cause}
+              </p>
+            )}
             {result.postmortem.recommendations.length > 0 && (
               <div>
                 <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">

@@ -30,6 +30,11 @@ export default function Home() {
     <main className="min-h-screen bg-gray-950 text-gray-100 p-6">
       <header className="mb-8 flex items-start justify-between">
         <div>
+          <a href="https://shipsafe-landing-o34wppiwiq-uc.a.run.app"
+             className="text-xs font-mono text-gray-600 hover:text-gray-400 transition-colors block mb-2"
+             style={{ textDecoration: 'none' }}>
+            ← ShipSafe
+          </a>
           <h1 className="text-2xl font-bold tracking-tight">
             ShipSafe AgentOps
           </h1>
