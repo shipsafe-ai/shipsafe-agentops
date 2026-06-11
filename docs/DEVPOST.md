@@ -13,7 +13,7 @@ You deploy AI agents to protect production — and then the agents become the ne
 
 Observability for distributed systems has always existed — but pointing it *at your agents*, and reasoning over the result, is the missing capstone. So we built the agent that watches the watchers.
 
-![Problem vs solution](problem-solution.png)
+![Problem vs solution](https://raw.githubusercontent.com/shipsafe-ai/shipsafe-agentops/main/docs/problem-solution.png)
 
 ## What it does
 
@@ -44,11 +44,11 @@ Six agents on **Google ADK**, running on **Cloud Run**. Every read goes through 
 
 **System architecture — AgentOps watching the fleet:**
 
-![System architecture](architecture-overview.png)
+![System architecture](https://raw.githubusercontent.com/shipsafe-ai/shipsafe-agentops/main/docs/architecture-overview.png)
 
 **The six-stage pipeline:**
 
-![Multi-agent pipeline](architecture-pipeline.png)
+![Multi-agent pipeline](https://raw.githubusercontent.com/shipsafe-ai/shipsafe-agentops/main/docs/architecture-pipeline.png)
 
 ```mermaid
 flowchart TD
@@ -72,7 +72,7 @@ flowchart TD
 
 **Gemini is the brain** — Grail spans become a typed fleet postmortem with the cascade root and cost, streamed live:
 
-![Gemini reasoning flow](gemini-data-flow.png)
+![Gemini reasoning flow](https://raw.githubusercontent.com/shipsafe-ai/shipsafe-agentops/main/docs/gemini-data-flow.png)
 
 Two Dynatrace channels keep it honest: an **OTel push** (the fleet emits traces) and a **DQL pull** (AgentOps queries Grail via the MCP). AgentOps only **reads** — it makes no HTTP calls to the other agents, so each submission runs independently.
 
