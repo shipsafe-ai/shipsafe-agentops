@@ -161,6 +161,26 @@ export default function RunPanel() {
               </span>
             )}
           </div>
+          {/* Progress bar */}
+          {(() => {
+            const done = steps.filter((s) => s.status === "done").length;
+            const running = steps.filter((s) => s.status === "running").length;
+            const pct = Math.round(((done + running * 0.5) / steps.length) * 100);
+            return (
+              <div className="mb-3">
+                <div className="flex justify-between text-xs text-gray-500 mb-1">
+                  <span>{done} / {steps.length} steps</span>
+                  <span>{pct}%</span>
+                </div>
+                <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-teal-500 rounded-full transition-all duration-500"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+              </div>
+            );
+          })()}
           <div className="space-y-2">
             {steps.map((s) => (
               <div key={s.step} className="flex items-start gap-3 text-sm">
