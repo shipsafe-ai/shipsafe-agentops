@@ -20,6 +20,8 @@ pricing agent, a customer-support bot. Point it at the services emitting
 traces; nothing here is domain-specific. The ShipSafe fleet is just the
 demo.
 
+![The blind spot vs the fix — five agents in production, one slows down at 3am, the cascade hits the whole fleet; AgentOps ingests the OTel and names the root agent](docs/problem-solution.png)
+
 ---
 
 ## What it does
@@ -42,6 +44,8 @@ Stages 1–4 each instruct Gemini (via the Dynatrace MCP toolset) to call
 `execute_dql` against Grail. Stage 5 is pure Gemini synthesis — it surfaces
 the model's reasoning via `include_thoughts` (thinking-capable Gemini
 models). Stage 6 reasons over the assembled report for manipulation.
+
+![AgentOps pipeline — FleetWatcher, CascadeTracer, TokenAccountant and AnomalyScout query Dynatrace Grail, then IncidentNarrator (Gemini) writes the fleet postmortem and the Critic gates it](docs/architecture-pipeline.png)
 
 CascadeTracer's core query — the thing that names the root agent of a
 cross-agent failure:
@@ -95,17 +99,17 @@ curl https://shipsafe-agentops-336382452417.us-central1.run.app/fleet?window_min
 
 ### CLI
 
-Published as `shipsafe-agentops` on npm. Commands: `health`, `fleet`,
-`run`, `demo`.
+Published as `shipsafe-agentops` on npm — uniform commands `init`, `demo`,
+`connect`, `health`, plus `fleet` and `run`:
 
 ```bash
-node cli/bin/agentops.js health --api https://shipsafe-agentops-336382452417.us-central1.run.app
-node cli/bin/agentops.js fleet  --window 30
-node cli/bin/agentops.js run    --window 30
-node cli/bin/agentops.js demo   # seed → wait for Grail → run pipeline
+npx shipsafe-agentops init      # connection details + health check
+npx shipsafe-agentops demo      # seed → wait for Grail → run the pipeline
+npx shipsafe-agentops fleet     # per-agent fleet health
+npx shipsafe-agentops connect   # point at your own OTel/Dynatrace
 ```
 
-`--api` defaults to `$AGENTOPS_API_URL` or `http://localhost:8080`.
+`AGENTOPS_API_URL` overrides the default deployed API.
 
 ---
 
@@ -160,6 +164,8 @@ agent pipeline.
 ---
 
 ## Architecture
+
+![System architecture — the ShipSafe fleet emits OpenTelemetry to Dynatrace Grail; AgentOps queries it via the Dynatrace MCP and reasons with Gemini on Vertex AI, gated by human review](docs/architecture-overview.png)
 
 ```
 Fleet services emit OTel spans
@@ -285,6 +291,8 @@ Two views:
   feed**: each of the 6 agents flips ●→✓ with a real one-line result as its
   stage completes, then the verdict banner, postmortem, Gemini thinking,
   and specialist summaries land.
+
+![Gemini as the brain — Grail spans become a fleet postmortem with the cascade root and cost, streamed live, gated by a human](docs/gemini-data-flow.png)
 
 ---
 
